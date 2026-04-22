@@ -42,6 +42,10 @@ def parse_curl(curl_str: str) -> dict:
     curl_str = curl_str.replace("“", '"').replace("”", '"')
     curl_str = curl_str.replace("‘", "'").replace("’", "'")
 
+    # ✅ Fix for Postman: Decode URL-encoded curly braces back to {{ and }}
+    curl_str = curl_str.replace("%7B", "{").replace("%7D", "}")
+    curl_str = curl_str.replace("%7b", "{").replace("%7d", "}")
+
     tokens = shlex.split(curl_str)
 
     method = None
@@ -57,11 +61,11 @@ def parse_curl(curl_str: str) -> dict:
             i += 1
             continue
 
-        if tok in ("--location", "-L"):
+        if tok in ("--location", "-L", "--compressed", "-k", "--insecure", "-i", "-s", "--silent", "-v", "--verbose"):
             i += 1
             continue
 
-        # ✅ FIXED HEADER PARSING
+        # HEADERS
         if tok in ("--header", "-H"):
             if i + 1 < len(tokens):
                 raw = tokens[i + 1]
@@ -77,9 +81,15 @@ def parse_curl(curl_str: str) -> dict:
                 continue
 
         # DATA
-        if tok in ("--data", "--data-raw", "--data-binary", "-d"):
+        if tok in ("--data", "--data-raw", "--data-binary", "-d", "--data-urlencode"):
             if i + 1 < len(tokens):
-                data = tokens[i + 1]
+                new_data = tokens[i + 1]
+                # If multiple data fields exist, join them with &
+                if data:
+                    data = f"{data}&{new_data}"
+                else:
+                    data = new_data
+                    
                 if not method:
                     method = "POST"
                 i += 2
@@ -91,12 +101,20 @@ def parse_curl(curl_str: str) -> dict:
                 method = tokens[i + 1].upper()
                 i += 2
                 continue
+                
+        # EXPLICIT URL FLAG
+        if tok in ("--url",):
+            if i + 1 < len(tokens):
+                url = tokens[i + 1]
+                i += 2
+                continue
 
-        # URL
-        if tok.startswith("http"):
-            url = tok
-            i += 1
-            continue
+        # ✅ POSITIONAL URL (Allow normal HTTP or URLs starting with {{variable}})
+        if not tok.startswith("-") and not url:
+            if tok.startswith("http") or "{{" in tok:
+                url = tok
+                i += 1
+                continue
 
         i += 1
 
@@ -158,6 +176,10 @@ def parse_data_file(content: str, filename: str) -> list:
 
 def execute_single(parsed, variables, timeout=30):
     url = substitute(parsed["url"], variables)
+    
+    # Safely convert spaces inside substituted URL variables to %20 to prevent requests from throwing an InvalidURL exception
+    url = url.replace(" ", "%20") 
+    
     headers = {k: substitute(v, variables) for k, v in parsed["headers"].items()}
     body = substitute(parsed["data"], variables) if parsed["data"] else None
 
@@ -258,6 +280,7 @@ def api_dry_run():
     previews = []
     for i, row in enumerate(rows):
         url = substitute(parsed["url"], row)
+        url = url.replace(" ", "%20") # Safely handle spaces in URLs
         headers = {k: substitute(v, row) for k, v in parsed["headers"].items()}
         body = substitute(parsed["data"], row) if parsed["data"] else None
         previews.append({
